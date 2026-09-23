@@ -1,0 +1,12 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+.env
+*.env
+entraid.json
+tests_sanity.py
+README.md
+.dockerignore

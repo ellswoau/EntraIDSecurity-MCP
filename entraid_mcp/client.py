@@ -292,6 +292,22 @@ class EntraIDClient:
         return self._parse(self._request("POST", path, params=params,
                                          json_body=json_body))
 
+    def patch(self, path: str, json_body: Any = None, *,
+              params: Optional[Dict[str, Any]] = None) -> Any:
+        return self._parse(self._request("PATCH", path, params=params,
+                                         json_body=json_body))
+
+    def delete(self, path: str, *,
+               params: Optional[Dict[str, Any]] = None,
+               json_body: Any = None) -> Any:
+        """DELETE a resource.
+
+        Graph replies ``204 No Content`` on success, which :meth:`_parse`
+        turns into ``None``; a JSON body (some endpoints) is returned as-is.
+        """
+        return self._parse(self._request("DELETE", path, params=params,
+                                         json_body=json_body))
+
     # ------------------------------------------------------------- pagination
     @staticmethod
     def unwrap(data: Any, key: str = "value") -> List[Any]:

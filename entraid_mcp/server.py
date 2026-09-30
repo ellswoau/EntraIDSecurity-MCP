@@ -95,11 +95,18 @@ def build_server(config=None):
             "Protection. Answer 'what access does this user have?' with "
             "get_user_directory_roles, get_user_memberships, "
             "get_user_app_role_assignments, get_user_oauth2_grants and "
-            "get_user_authentication_methods. Mutating tools (dismiss_risky_user, "
-            "confirm_risky_user_compromised) change Identity Protection state -- "
-            "confirm the target first. entra_api_get is a read-only escape hatch "
-            "for other Graph v1.0 endpoints. All reads need the corresponding "
-            "Microsoft Graph application permission with admin consent."
+            "get_user_authentication_methods. Mutating tools change state -- "
+            "confirm the target first. Group/DL/Team membership: list_groups, "
+            "get_group, list_group_members, add_group_member, remove_group_member. "
+            "Sessions: revoke_user_sessions. MFA reset: get_user_authentication_methods, "
+            "delete_user_auth_method, reset_user_mfa_methods. Mailbox: "
+            "get_user_out_of_office, set_user_out_of_office, "
+            "unset_user_out_of_office, list_mail_forwarding_rules, "
+            "set_mail_forwarding, remove_mail_forwarding_rule. Shared-mailbox "
+            "DELEGATION (Full Access / Send As) is NOT available in Graph -- use "
+            "Exchange Online PowerShell for that. entra_api_get is a read-only "
+            "escape hatch for other Graph v1.0 endpoints. All calls need the "
+            "corresponding Microsoft Graph application permission with admin consent."
         ),
     )
 

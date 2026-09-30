@@ -21,8 +21,12 @@ from entraid_mcp.config import ConfigError, EntraIDConfig, load_config
 from entraid_mcp.tools import (
     api_tools,
     audit_tools,
+    group_tools,
+    mailbox_tools,
+    mfa_tools,
     response_tools,
     risky_tools,
+    session_tools,
     signin_tools,
     user_tools,
 )
@@ -109,6 +113,10 @@ def _setup(responses=None, seed_token=False, **cfg_kw):
     audit_tools.register(mcp, cfg)
     risky_tools.register(mcp, cfg)
     user_tools.register(mcp, cfg)
+    group_tools.register(mcp, cfg)
+    mfa_tools.register(mcp, cfg)
+    session_tools.register(mcp, cfg)
+    mailbox_tools.register(mcp, cfg)
     response_tools.register(mcp, cfg)
     api_tools.register(mcp, cfg)
     return cfg, client, mcp
@@ -455,6 +463,230 @@ class TestUrlVetting(unittest.TestCase):
         cfg, client, mcp = _setup()
         with self.assertRaises(ValueError):
             mcp.tools["entra_api_get"]("/users", "{not json}")
+
+
+# ---------------------------------------------------- group membership
+class TestGroupTools(unittest.TestCase):
+    def test_add_member_posts_ref_and_verifies(self):
+        cfg, client, mcp = _setup(responses=[
+            FakeResponse(204, has_content=False),
+            FakeResponse(200, {"value": [{"id": GUID}]}),
+        ])
+        out = mcp.tools["add_group_member"](GUID, GUID)
+        req = client._session.requests[0]
+        self.assertEqual(req["method"], "POST")
+        self.assertTrue(req["url"].endswith(f"/groups/{GUID}/members/$ref"))
+        self.assertEqual(req["json"],
+                         {"@odata.id": f"https://graph.microsoft.com/v1.0/directoryObjects/{GUID}"})
+        self.assertTrue(out["added"])
+        self.assertTrue(out["verified_present"])
+
+    def test_add_member_resolves_upn(self):
+        cfg, client, mcp = _setup(responses=[
+            FakeResponse(200, {"id": GUID}),          # resolve UPN -> id
+            FakeResponse(204, has_content=False),      # POST $ref
+            FakeResponse(200, {"value": [{"id": GUID}]}),  # verify
+        ])
+        out = mcp.tools["add_group_member"](GUID, "jdoe@contoso.com")
+        self.assertEqual(out["member_id"], GUID)
+        self.assertTrue(client._session.requests[0]["url"].endswith(
+            "/users/jdoe%40contoso.com"))
+
+    def test_remove_member_deletes_ref(self):
+        cfg, client, mcp = _setup(responses=[
+            FakeResponse(204, has_content=False),
+            FakeResponse(200, {"value": []}),
+        ])
+        out = mcp.tools["remove_group_member"](GUID, GUID)
+        req = client._session.requests[0]
+        self.assertEqual(req["method"], "DELETE")
+        self.assertTrue(req["url"].endswith(
+            f"/groups/{GUID}/members/{GUID}/$ref"))
+        self.assertTrue(out["removed"])
+        self.assertTrue(out["verified_absent"])
+
+    def test_get_group_resolves_mail(self):
+        cfg, client, mcp = _setup(responses=[
+            FakeResponse(200, {"value": [{"id": GUID}]}),  # mail lookup
+            FakeResponse(200, {"id": GUID, "displayName": "Sales DL"}),
+        ])
+        out = mcp.tools["get_group"]("sales@contoso.com")
+        self.assertEqual(out["group_id"], GUID)
+        self.assertTrue(client._session.requests[0]["url"].endswith("/groups"))
+        self.assertEqual(
+            client._session.requests[0]["params"]["$filter"],
+            "mail eq 'sales@contoso.com'")
+
+    def test_list_groups_builds_type_filter(self):
+        cfg, client, mcp = _setup(responses=[FakeResponse(200, {"value": []})])
+        mcp.tools["list_groups"](query="Sales", mail_enabled=True,
+                                  unified_only=True)
+        filt = client._session.requests[0]["params"]["$filter"]
+        self.assertIn("startswith(displayName,'Sales')", filt)
+        self.assertIn("mailEnabled eq true", filt)
+        self.assertIn("groupTypes/any(gt:gt eq 'Unified')", filt)
+
+
+# ------------------------------------------------------------- MFA reset
+class TestMfaTools(unittest.TestCase):
+    def test_reset_refuses_without_confirm(self):
+        cfg, client, mcp = _setup()
+        out = mcp.tools["reset_user_mfa_methods"](GUID)
+        self.assertFalse(out["reset"])
+        self.assertEqual(len(client._session.requests), 0)
+
+    def test_reset_deletes_each_method_by_collection(self):
+        cfg, client, mcp = _setup(responses=[
+            FakeResponse(200, {"value": [
+                {"id": "m1", "@odata.type": "#microsoft.graph.phoneAuthenticationMethod"},
+                {"id": "m2", "@odata.type": "#microsoft.graph.microsoftAuthenticatorAuthenticationMethod"},
+            ]}),
+            FakeResponse(204, has_content=False),
+            FakeResponse(204, has_content=False),
+            FakeResponse(200, {"value": []}),
+        ])
+        out = mcp.tools["reset_user_mfa_methods"](GUID, confirm=True)
+        self.assertEqual(out["deleted_count"], 2)
+        urls = [r["url"] for r in client._session.requests]
+        self.assertTrue(any(u.endswith(f"/users/{GUID}/authentication/phoneMethods/m1")
+                            for u in urls))
+        self.assertTrue(any(u.endswith(
+            f"/users/{GUID}/authentication/microsoftAuthenticatorMethods/m2")
+            for u in urls))
+
+    def test_reset_skips_windows_hello_by_default(self):
+        cfg, client, mcp = _setup(responses=[
+            FakeResponse(200, {"value": [
+                {"id": "w1", "@odata.type": "#microsoft.graph.windowsHelloForBusinessAuthenticationMethod"},
+            ]}),
+            FakeResponse(200, {"value": []}),
+        ])
+        out = mcp.tools["reset_user_mfa_methods"](GUID, confirm=True)
+        self.assertEqual(out["deleted_count"], 0)
+        self.assertEqual(len(out["skipped"]), 1)
+
+    def test_delete_single_method_resolves_type(self):
+        cfg, client, mcp = _setup(responses=[
+            FakeResponse(200, {"value": [
+                {"id": "m2", "@odata.type": "#microsoft.graph.microsoftAuthenticatorAuthenticationMethod"},
+            ]}),
+            FakeResponse(204, has_content=False),
+        ])
+        out = mcp.tools["delete_user_auth_method"](GUID, "m2")
+        self.assertTrue(out["method"]["deleted"])
+        self.assertTrue(client._session.requests[1]["url"].endswith(
+            f"/users/{GUID}/authentication/microsoftAuthenticatorMethods/m2"))
+
+
+# -------------------------------------------------------------- sessions
+class TestSessionTools(unittest.TestCase):
+    def test_revoke_refuses_without_confirm(self):
+        cfg, client, mcp = _setup()
+        out = mcp.tools["revoke_user_sessions"](GUID)
+        self.assertFalse(out["revoked"])
+        self.assertEqual(len(client._session.requests), 0)
+
+    def test_revoke_posts_and_reports_timestamp(self):
+        cfg, client, mcp = _setup(responses=[
+            FakeResponse(204, has_content=False),
+            FakeResponse(200, {"id": GUID,
+                               "signInSessionsValidFromDateTime": "2026-09-30T20:00:00Z"}),
+        ])
+        out = mcp.tools["revoke_user_sessions"](GUID, confirm=True)
+        req = client._session.requests[0]
+        self.assertEqual(req["method"], "POST")
+        self.assertTrue(req["url"].endswith(f"/users/{GUID}/revokeSignInSessions"))
+        self.assertTrue(out["revoked"])
+        self.assertEqual(out["sign_in_sessions_valid_from_date_time"],
+                         "2026-09-30T20:00:00Z")
+
+
+# --------------------------------------------------------------- mailbox
+class TestMailboxTools(unittest.TestCase):
+    def test_get_ooo_summarizes(self):
+        cfg, client, mcp = _setup(responses=[FakeResponse(200, {
+            "automaticRepliesSetting": {"status": "alwaysEnabled",
+                                        "externalAudience": "all",
+                                        "internalReplyMessage": "On leave"}})])
+        out = mcp.tools["get_user_out_of_office"]("jdoe@contoso.com")
+        self.assertEqual(out["automatic_replies"]["status"], "alwaysEnabled")
+        self.assertTrue(client._session.requests[0]["url"].endswith(
+            "/users/jdoe%40contoso.com/mailboxSettings"))
+
+    def test_set_ooo_patches_automatic_replies(self):
+        cfg, client, mcp = _setup(responses=[
+            FakeResponse(204, has_content=False),
+            FakeResponse(200, {"automaticRepliesSetting": {"status": "alwaysEnabled"}}),
+        ])
+        mcp.tools["set_user_out_of_office"]("jdoe@contoso.com", "Out today",
+                                             external_audience="all")
+        req = client._session.requests[0]
+        self.assertEqual(req["method"], "PATCH")
+        ar = req["json"]["automaticRepliesSetting"]
+        self.assertEqual(ar["status"], "alwaysEnabled")
+        self.assertEqual(ar["internalReplyMessage"], "Out today")
+
+    def test_set_ooo_scheduled_requires_both_bounds(self):
+        cfg, client, mcp = _setup()
+        with self.assertRaises(ValueError):
+            mcp.tools["set_user_out_of_office"]("jdoe@contoso.com", "msg",
+                                                 start="2026-09-30")
+
+    def test_unset_ooo_patches_disabled(self):
+        cfg, client, mcp = _setup(responses=[
+            FakeResponse(204, has_content=False),
+            FakeResponse(200, {"automaticRepliesSetting": {"status": "disabled"}}),
+        ])
+        mcp.tools["unset_user_out_of_office"]("jdoe@contoso.com")
+        self.assertEqual(
+            client._session.requests[0]["json"],
+            {"automaticRepliesSetting": {"status": "disabled"}})
+
+    def test_list_forwarding_filters_rules(self):
+        rules = {"value": [
+            {"id": "r1", "displayName": "fwd",
+             "actions": {"forwardTo": [{"emailAddress": {"address": "x@contoso.com"}}]}},
+            {"id": "r2", "displayName": "other", "actions": {}},
+        ]}
+        cfg, client, mcp = _setup(responses=[FakeResponse(200, rules)])
+        out = mcp.tools["list_mail_forwarding_rules"]("jdoe@contoso.com")
+        self.assertEqual(out["forwarding_rule_count"], 1)
+        self.assertEqual(out["forwarding_rules"][0]["forward_targets"],
+                         ["forwardTo:x@contoso.com"])
+
+    def test_set_forwarding_posts_rule(self):
+        cfg, client, mcp = _setup(responses=[
+            FakeResponse(201, {"id": "r9", "displayName": "fwd",
+                               "actions": {"forwardTo": [{"emailAddress": {"address": "dest@contoso.com"}}]}}),
+            FakeResponse(200, {"value": []}),
+        ])
+        mcp.tools["set_mail_forwarding"]("jdoe@contoso.com", "dest@contoso.com")
+        req = client._session.requests[0]
+        self.assertEqual(req["method"], "POST")
+        self.assertTrue(req["url"].endswith(
+            "/users/jdoe%40contoso.com/mail/mailFolders/inbox/messageRules"))
+        self.assertIn("forwardTo", req["json"]["actions"])
+
+    def test_remove_forwarding_refuses_without_confirm(self):
+        cfg, client, mcp = _setup()
+        out = mcp.tools["remove_mail_forwarding_rule"]("jdoe@contoso.com", "r1")
+        self.assertFalse(out["removed"])
+        self.assertEqual(len(client._session.requests), 0)
+
+
+# ----------------------------------------------------------- client verbs
+class TestClientVerbs(unittest.TestCase):
+    def test_patch_issues_patch(self):
+        cfg, client, mcp = _setup(responses=[FakeResponse(204, has_content=False)])
+        client.patch("/users/" + GUID, {"accountEnabled": False})
+        req = client._session.requests[0]
+        self.assertEqual(req["method"], "PATCH")
+        self.assertEqual(req["json"], {"accountEnabled": False})
+
+    def test_delete_issues_delete(self):
+        cfg, client, mcp = _setup(responses=[FakeResponse(204, has_content=False)])
+        client.delete("/users/" + GUID)
+        self.assertEqual(client._session.requests[0]["method"], "DELETE")
 
 
 if __name__ == "__main__":

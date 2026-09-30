@@ -13,7 +13,7 @@ Protection risk, and enumerate the permissions and access a user actually holds.
 
 > Runs both as a direct `python -m` process **and** as a Docker container.
 
-## Tools (21)
+## Tools (35)
 
 **Sign-in logs** (`/auditLogs/signIns`)
 - `list_sign_ins` — all sign-ins, filter by user/app/IP/error code/CA status/risk/date window.
@@ -44,6 +44,32 @@ Protection risk, and enumerate the permissions and access a user actually holds.
 - `get_user_app_role_assignments` — enterprise-app role assignments.
 - `get_user_oauth2_grants` — delegated OAuth2 scopes an app can use on their behalf.
 - `get_user_authentication_methods` — registered MFA / passwordless methods.
+
+**Group / distribution-list / Team membership** (`/groups`)
+- `list_groups` — find groups/DLs/Teams (by name prefix, mail-enabled /
+  security / unified).
+- `get_group` — one group's profile (id, mail, type, unified/Team flag).
+- `list_group_members` — members of a group / DL / Team.
+- `add_group_member` — **mutating**: add a user to a group / DL / Team.
+- `remove_group_member` — **mutating**: remove a user from a group / DL / Team.
+
+**Session revocation**
+- `revoke_user_sessions` — **mutating**: invalidate all of a user's refresh
+  tokens / browser sessions (forces re-sign-in everywhere). Needs `confirm=True`.
+
+**MFA reset**
+- `delete_user_auth_method` — **mutating**: delete ONE registered auth method.
+- `reset_user_mfa_methods` — **mutating**: wipe all registered MFA/passwordless
+  methods. Needs `confirm=True`.
+
+**Mailbox (out-of-office + forwarding)**
+- `get_user_out_of_office` — read automatic replies.
+- `set_user_out_of_office` — **mutating**: set an always-on or scheduled OOO.
+- `unset_user_out_of_office` — **mutating**: turn OOO off.
+- `list_mail_forwarding_rules` — Inbox rules that forward/redirect mail.
+- `set_mail_forwarding` — **mutating**: create a forward/redirect rule.
+- `remove_mail_forwarding_rule` — **mutating**: delete a forwarding rule.
+  Needs `confirm=True`.
 
 **Misc**
 - `entra_api_get` — read-only GET escape hatch for any other Graph v1.0 path.
@@ -89,6 +115,42 @@ Add only if you want the two mutating tools enabled:
 | Permission | Used by |
 |---|---|
 | `IdentityRiskyUser.ReadWrite.All` | `dismiss_risky_user`, `confirm_risky_user_compromised` |
+
+### Additional permissions for the admin/management tools
+
+These are the **write** permissions the management tools need. Grant them
+(application permissions + admin consent) the same way:
+
+| Permission | Used by |
+|---|---|
+| `Group.ReadWrite.All` | `add_group_member`, `remove_group_member` (also needs `Directory.Read.All` for `list_groups`/`list_group_members`/`get_group`) |
+| `User.RevokeSessions.All` | `revoke_user_sessions` (or `User.ReadWrite.All`) |
+| `UserAuthenticationMethod.ReadWrite.All` | `delete_user_auth_method`, `reset_user_mfa_methods` |
+| `MailboxSettings.ReadWrite` | `set_user_out_of_office`, `unset_user_out_of_office` (Read is enough for `get_user_out_of_office`) |
+| `Mail.ReadWrite` | `list_mail_forwarding_rules`, `set_mail_forwarding`, `remove_mail_forwarding_rule` |
+
+> **Mail forwarding uses `Mail.ReadWrite`, not `Mail.Send`** — a forwarding
+> rule is an Inbox message rule, not a send operation.
+
+### What Graph cannot do (important)
+
+**Shared-mailbox delegation is not available in Microsoft Graph.** Adding or
+removing a user's Full Access / Send As / Send on Behalf permission on a
+(non-user) shared mailbox is an Exchange Online mailbox-permission operation
+and only exists in **Exchange Online PowerShell**:
+
+```powershell
+Add-MailboxPermission -Identity "shared@contoso.com" -User "user@contoso.com" `
+  -AccessRights FullAccess -AutoMapping $false
+Add-RecipientPermission -Identity "shared@contoso.com" -Trustee "user@contoso.com" `
+  -AccessRights SendAs
+```
+
+Graph *can* read/change a shared mailbox's **own** settings (out-of-office,
+Inbox rules, messages) by addressing it with its id/UPN — that is what the
+mailbox tools above do. Membership in a **group-backed** mailbox (a
+mail-enabled security group / Microsoft 365 group) *is* manageable via
+`add_group_member` / `remove_group_member`.
 
 ### Licensing note
 

@@ -24,6 +24,27 @@ AUDIT_CATEGORIES = (
     "Authorization", "DeviceConfiguration", "Other",
 )
 
+# Exchange message-trace delivery statuses (exchangeMessageTraceStatus).
+MESSAGE_TRACE_STATUSES = (
+    "gettingStatus", "pending", "failed", "delivered", "expanded",
+    "quarantined", "filteredAsSpam", "unknownFutureValue",
+)
+# Subject-filter functions the message trace API supports.
+MESSAGE_TRACE_SUBJECT_FILTERS = ("contains", "startsWith", "endsWith")
+
+# A simple, conservative SMTP address shape (local part + dotted domain).
+_EMAIL_RE = re.compile(r"^[^\s@<>()\[\]\\,;:\"]+@[^\s@<>()\[\]\\,;:\"]+\.[^\s@<>()\[\]\\,;:\"]+$")
+
+
+def validate_email(value: Any, field: str = "email") -> str:
+    """Validate an SMTP email address before it is interpolated into a filter."""
+    s = str(value or "").strip()
+    if not _EMAIL_RE.match(s):
+        raise ValueError(
+            f"Invalid {field}: {value!r} (expected an SMTP address such as "
+            "'user@contoso.com').")
+    return s
+
 
 def validate_guid(value: Any, field: str = "id") -> str:
     """Validate an Entra ID object id (a GUID)."""
@@ -111,6 +132,24 @@ def validate_bool(value: Any, field: str) -> bool:
     if s in ("false", "0", "no"):
         return False
     raise ValueError(f"Invalid {field}: {value!r} (expected true/false).")
+
+
+def validate_hours(value: Any, field: str = "hours", *, maximum: int = 2160) -> int:
+    """Validate a rolling-window length in hours (default max 90 days)."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid {field}: {value!r} (expected an integer).") from exc
+    if n < 1 or n > maximum:
+        raise ValueError(f"Invalid {field}: {n} (expected 1..{maximum}).")
+    return n
+
+
+def date_window_hours(start_iso: str, end_iso: str) -> float:
+    """Return (end - start) in hours for two normalized UTC ISO-8601 values."""
+    a = datetime.strptime(start_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    b = datetime.strptime(end_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return (b - a).total_seconds() / 3600.0
 
 
 def join_filters(parts: List[Optional[str]]) -> Optional[str]:

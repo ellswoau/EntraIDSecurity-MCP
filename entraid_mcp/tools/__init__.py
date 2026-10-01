@@ -16,6 +16,7 @@ from . import (
     audit_tools,
     group_tools,
     mailbox_tools,
+    message_trace_tools,
     mfa_tools,
     response_tools,
     risky_tools,
@@ -34,5 +35,6 @@ def register_all(mcp: "FastMCP", config: "EntraIDConfig") -> None:
     mfa_tools.register(mcp, config)
     session_tools.register(mcp, config)
     mailbox_tools.register(mcp, config)
+    message_trace_tools.register(mcp, config)
     response_tools.register(mcp, config)
     api_tools.register(mcp, config)

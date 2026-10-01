@@ -188,15 +188,18 @@ class EntraIDClient:
         return dict(self._token_info)
 
     # ---------------------------------------------------------------- request
-    def _url(self, path: str) -> str:
+    def _url(self, path: str, base_url: Optional[str] = None) -> str:
         """Resolve a relative Graph path, or vet an absolute (nextLink) URL.
 
-        An absolute URL is accepted only when it targets this client's Graph
-        origin -- so a caller-supplied ``https://evil.example/...`` can never
-        receive the bearer token.
+        ``base_url`` optionally overrides this client's service root for one
+        call (e.g. the beta-only Exchange message-trace API). An absolute URL is
+        accepted only when it targets the effective base URL's origin -- so a
+        caller-supplied ``https://evil.example/...`` can never receive the
+        bearer token.
         """
+        root = (base_url or self.base_url).rstrip("/")
         if path.startswith("http://") or path.startswith("https://"):
-            parts = urlsplit(self.base_url)
+            parts = urlsplit(root)
             origin = f"{parts.scheme}://{parts.netloc}"
             if not path.startswith(origin + "/"):
                 raise EntraIDError(
@@ -207,13 +210,14 @@ class EntraIDClient:
             return path
         if not path.startswith("/"):
             path = "/" + path
-        return f"{self.base_url}{path}"
+        return f"{root}{path}"
 
     def _request(self, method: str, path: str, *,
                  params: Optional[Dict[str, Any]] = None,
                  json_body: Any = None,
+                 base_url: Optional[str] = None,
                  _renewed: bool = False) -> requests.Response:
-        url = self._url(path)
+        url = self._url(path, base_url)
         token = self.ensure_token()
         headers = {"Authorization": f"Bearer {token}"}
         clean_params = {k: v for k, v in (params or {}).items() if v is not None}
@@ -263,7 +267,8 @@ class EntraIDClient:
             with self._token_lock:
                 self.authenticate()
             return self._request(method, path, params=params,
-                                 json_body=json_body, _renewed=True)
+                                 json_body=json_body, base_url=base_url,
+                                 _renewed=True)
 
         if resp.status_code < 200 or resp.status_code >= 300:
             body = self._parse(resp)
@@ -284,29 +289,34 @@ class EntraIDClient:
         return resp
 
     # --------------------------------------------------------- convenience API
-    def get(self, path: str, *, params: Optional[Dict[str, Any]] = None) -> Any:
-        return self._parse(self._request("GET", path, params=params))
+    def get(self, path: str, *, params: Optional[Dict[str, Any]] = None,
+            base_url: Optional[str] = None) -> Any:
+        return self._parse(self._request("GET", path, params=params,
+                                         base_url=base_url))
 
     def post(self, path: str, json_body: Any = None, *,
-             params: Optional[Dict[str, Any]] = None) -> Any:
+             params: Optional[Dict[str, Any]] = None,
+             base_url: Optional[str] = None) -> Any:
         return self._parse(self._request("POST", path, params=params,
-                                         json_body=json_body))
+                                         json_body=json_body, base_url=base_url))
 
     def patch(self, path: str, json_body: Any = None, *,
-              params: Optional[Dict[str, Any]] = None) -> Any:
+              params: Optional[Dict[str, Any]] = None,
+              base_url: Optional[str] = None) -> Any:
         return self._parse(self._request("PATCH", path, params=params,
-                                         json_body=json_body))
+                                         json_body=json_body, base_url=base_url))
 
     def delete(self, path: str, *,
                params: Optional[Dict[str, Any]] = None,
-               json_body: Any = None) -> Any:
+               json_body: Any = None,
+               base_url: Optional[str] = None) -> Any:
         """DELETE a resource.
 
         Graph replies ``204 No Content`` on success, which :meth:`_parse`
         turns into ``None``; a JSON body (some endpoints) is returned as-is.
         """
         return self._parse(self._request("DELETE", path, params=params,
-                                         json_body=json_body))
+                                         json_body=json_body, base_url=base_url))
 
     # ------------------------------------------------------------- pagination
     @staticmethod
@@ -332,14 +342,15 @@ class EntraIDClient:
         return None
 
     def collect(self, path: str, *, params: Optional[Dict[str, Any]] = None,
-                max_pages: int = 1) -> Tuple[List[Any], Optional[str]]:
+                max_pages: int = 1, base_url: Optional[str] = None
+                ) -> Tuple[List[Any], Optional[str]]:
         """Fetch up to ``max_pages`` pages, following ``@odata.nextLink``.
 
         Returns ``(items, next_link)`` where ``next_link`` is non-None only when
         more results exist beyond the pages fetched.
         """
         items: List[Any] = []
-        batch = self.get(path, params=params)
+        batch = self.get(path, params=params, base_url=base_url)
         pages = 0
         next_link = None
         while True:
@@ -348,7 +359,7 @@ class EntraIDClient:
             next_link = self.next_link(batch)
             if not next_link or pages >= max(1, int(max_pages)):
                 break
-            batch = self.get(next_link)
+            batch = self.get(next_link, base_url=base_url)
         return items, next_link
 
     def test_connection(self) -> Dict[str, Any]:

@@ -13,7 +13,7 @@ Protection risk, and enumerate the permissions and access a user actually holds.
 
 > Runs both as a direct `python -m` process **and** as a Docker container.
 
-## Tools (35)
+## Tools (37)
 
 **Sign-in logs** (`/auditLogs/signIns`)
 - `list_sign_ins` — all sign-ins, filter by user/app/IP/error code/CA status/risk/date window.
@@ -71,6 +71,14 @@ Protection risk, and enumerate the permissions and access a user actually holds.
 - `remove_mail_forwarding_rule` — **mutating**: delete a forwarding rule.
   Needs `confirm=True`.
 
+**Exchange message trace** (`/admin/exchange/tracing/messageTraces` — Graph **beta**)
+- `list_message_traces` — trace email through Exchange Online (last 90 days):
+  sender/recipient, subject, delivery status, size, source/destination IPs.
+  Filter by sender, recipient, status, subject, Message-ID, trace id, to-IP and
+  a time window (max 10 days per request).
+- `get_message_trace_details` — the per-message processing steps (Receive,
+  Deliver, Transport rule, Fail, ...) for one traced message + recipient.
+
 **Misc**
 - `entra_api_get` — read-only GET escape hatch for any other Graph v1.0 path.
 - `entraid_config` — redacted view of the configured tenant/app.
@@ -110,6 +118,8 @@ Least-privilege set for a **read-only** investigation server:
 | `UserAuthenticationMethod.Read.All` | `get_user_authentication_methods` |
 | `Organization.Read.All` | `entraid_config`, `ping` connection test |
 
+| `ExchangeMessageTrace.Read.All` | `list_message_traces`, `get_message_trace_details` (see the service-principal note below) |
+
 Add only if you want the two mutating tools enabled:
 
 | Permission | Used by |
@@ -131,6 +141,28 @@ These are the **write** permissions the management tools need. Grant them
 
 > **Mail forwarding uses `Mail.ReadWrite`, not `Mail.Send`** — a forwarding
 > rule is an Inbox message rule, not a send operation.
+
+### Exchange message trace needs a provisioned service principal
+
+The Graph-based **message trace API is beta-only** and has an extra onboarding
+step beyond the app permission: a service principal must exist in the tenant for
+Microsoft's multi-tenant message-trace app, id
+`8bd644d1-64a1-4d4b-ae52-2e0cbf64e373`. Create it once (admin):
+
+```powershell
+Connect-MgGraph -Scopes "Application.ReadWrite.All"
+Import-Module Microsoft.Graph.Applications
+New-MgServicePrincipal -BodyAppId "8bd644d1-64a1-4d4b-ae52-2e0cbf64e373"
+```
+
+Until the service principal finishes provisioning (can take a few hours), the
+two message-trace tools return `401`:
+`Service principal-less authentication failed: The service principal for App ID
+8bd644d1-64a1-4d4b-ae52-2e0cbf64e373 was not found.`
+
+Message trace is throttled at **100 requests / 5 minutes** per tenant (the list
+and detail APIs have separate buckets). Data is retained 90 days; each request
+spans at most 10 days (call with adjacent windows for longer ranges).
 
 ### What Graph cannot do (important)
 

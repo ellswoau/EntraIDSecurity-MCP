@@ -23,6 +23,7 @@ from entraid_mcp.tools import (
     audit_tools,
     group_tools,
     mailbox_tools,
+    message_trace_tools,
     mfa_tools,
     response_tools,
     risky_tools,
@@ -117,6 +118,7 @@ def _setup(responses=None, seed_token=False, **cfg_kw):
     mfa_tools.register(mcp, cfg)
     session_tools.register(mcp, cfg)
     mailbox_tools.register(mcp, cfg)
+    message_trace_tools.register(mcp, cfg)
     response_tools.register(mcp, cfg)
     api_tools.register(mcp, cfg)
     return cfg, client, mcp
@@ -687,6 +689,97 @@ class TestClientVerbs(unittest.TestCase):
         cfg, client, mcp = _setup(responses=[FakeResponse(204, has_content=False)])
         client.delete("/users/" + GUID)
         self.assertEqual(client._session.requests[0]["method"], "DELETE")
+
+
+# ------------------------------------------------------ exchange message trace
+class TestMessageTrace(unittest.TestCase):
+    def test_list_builds_beta_request_with_window(self):
+        cfg, client, mcp = _setup(seed_token=True)
+        out = mcp.tools["list_message_traces"](
+            start="2026-09-20", end="2026-09-22", sender="a@contoso.com")
+        req = client._session.requests[0]
+        self.assertEqual(req["method"], "GET")
+        # message trace lives on the beta root, not v1.0
+        self.assertTrue(req["url"].startswith(
+            cfg.resolved_beta_url() + "/admin/exchange/tracing/messageTraces"))
+        self.assertIn("receivedDateTime ge 2026-09-20T00:00:00Z", req["params"]["$filter"])
+        self.assertIn("receivedDateTime le 2026-09-22T00:00:00Z", req["params"]["$filter"])
+        self.assertIn("senderAddress eq 'a@contoso.com'", req["params"]["$filter"])
+        self.assertEqual(out["count"], 0)
+        self.assertEqual(out["window"]["start"], "2026-09-20T00:00:00Z")
+
+    def test_list_defaults_to_window_hours(self):
+        payload = {"value": [{"id": "t1", "senderAddress": "s@contoso.com",
+                              "recipientAddress": "r@contoso.com",
+                              "status": "delivered", "subject": "Hi",
+                              "receivedDateTime": "2026-09-30T12:00:00Z"}]}
+        cfg, client, mcp = _setup(responses=[FakeResponse(200, payload)])
+        out = mcp.tools["list_message_traces"](hours=24)
+        flt = client._session.requests[0]["params"]["$filter"]
+        self.assertIn("receivedDateTime ge", flt)
+        self.assertIn("receivedDateTime le", flt)
+        self.assertEqual(out["traces"][0]["status"], "delivered")
+        self.assertEqual(out["traces"][0]["recipient_address"], "r@contoso.com")
+
+    def test_status_and_subject_filters(self):
+        cfg, client, mcp = _setup(seed_token=True)
+        mcp.tools["list_message_traces"](
+            start="2026-09-20", end="2026-09-21", status="quarantined",
+            subject="Weekly digest", subject_filter="contains")
+        flt = client._session.requests[0]["params"]["$filter"]
+        self.assertIn("status eq 'quarantined'", flt)
+        self.assertIn("contains(subject, 'Weekly digest')", flt)
+
+    def test_window_over_ten_days_is_rejected(self):
+        cfg, client, mcp = _setup(seed_token=True)
+        with self.assertRaises(ValueError):
+            mcp.tools["list_message_traces"](start="2026-09-01", end="2026-09-20")
+        self.assertEqual(len(client._session.requests), 0)
+
+    def test_only_one_of_start_end_is_rejected(self):
+        cfg, client, mcp = _setup(seed_token=True)
+        with self.assertRaises(ValueError):
+            mcp.tools["list_message_traces"](start="2026-09-20")
+
+    def test_bad_status_rejected_before_request(self):
+        cfg, client, mcp = _setup(seed_token=True)
+        with self.assertRaises(ValueError):
+            mcp.tools["list_message_traces"](hours=24, status="nonsense")
+        self.assertEqual(len(client._session.requests), 0)
+
+    def test_top_out_of_range_rejected(self):
+        cfg, client, mcp = _setup(seed_token=True)
+        with self.assertRaises(ValueError):
+            mcp.tools["list_message_traces"](hours=24, top=6000)
+
+    def test_details_build_get_details_by_recipient(self):
+        cfg, client, mcp = _setup(responses=[FakeResponse(200, {"value": [
+            {"id": "t1", "event": "Deliver", "action": "",
+             "description": "The message was successfully delivered.",
+             "data": "<root/>"}]})])
+        out = mcp.tools["get_message_trace_details"](
+            "7e3b2b2e-1b5e-4b17-80cc-2af6c1d9a3b1", "robert@contoso.com")
+        req = client._session.requests[0]
+        self.assertTrue(req["url"].startswith(cfg.resolved_beta_url()))
+        self.assertIn("getDetailsByRecipient", req["url"])
+        self.assertIn("recipientAddress=robert%40contoso.com", req["url"])
+        self.assertEqual(out["count"], 1)
+        self.assertEqual(out["details"][0]["event"], "Deliver")
+
+    def test_details_reject_bad_recipient(self):
+        cfg, client, mcp = _setup(seed_token=True)
+        with self.assertRaises(ValueError):
+            mcp.tools["get_message_trace_details"]("t1", "not-an-email")
+        self.assertEqual(len(client._session.requests), 0)
+
+    def test_beta_url_derivation(self):
+        cfg = _config()
+        self.assertEqual(cfg.resolved_beta_url(),
+                         "https://graph.microsoft.com/beta")
+        # nextLink on the beta root is followed within the beta origin.
+        cfg2 = _config(base_url="https://graph.microsoft.us/v1.0")
+        self.assertEqual(cfg2.resolved_beta_url(),
+                         "https://graph.microsoft.us/beta")
 
 
 if __name__ == "__main__":

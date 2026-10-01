@@ -36,6 +36,8 @@ ENV_CONFIG_FILE = "ENTRAID_CONFIG_FILE"
 ENV_MCP_TOKEN = "ENTRAID_MCP_AUTH_TOKEN"
 
 DEFAULT_BASE_URL = "https://graph.microsoft.com/v1.0"
+# The Exchange message-trace API is published on the Graph *beta* endpoint only.
+DEFAULT_BETA_URL = "https://graph.microsoft.com/beta"
 DEFAULT_AUTHORITY_HOST = "https://login.microsoftonline.com"
 DEFAULT_SCOPE = "https://graph.microsoft.com/.default"
 
@@ -68,6 +70,22 @@ class EntraIDConfig:
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
         return url.rstrip("/")
+
+    def resolved_beta_url(self) -> str:
+        """Return the Graph *beta* service root (used by beta-only APIs).
+
+        Derived from ``base_url`` by swapping a trailing ``/vX.Y`` for
+        ``/beta`` so a sovereign-cloud base URL is respected; falls back to the
+        public beta root when no version segment is present.
+        """
+        base = self.resolved_base_url()
+        for ver in ("/v1.0", "/beta"):
+            if base.endswith(ver):
+                base = base[: -len(ver)]
+                break
+        if not base:
+            return DEFAULT_BETA_URL
+        return base + "/beta"
 
     def resolved_authority_host(self) -> str:
         host = (self.authority_host or "").strip() or DEFAULT_AUTHORITY_HOST

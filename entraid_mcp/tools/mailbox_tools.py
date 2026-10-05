@@ -10,9 +10,9 @@ Forwarding
     CREATE such a rule but cannot filter rules by their action, so this module
     finds forwarding rules by listing the Inbox rules and inspecting each one:
 
-        GET    /users/{id}/mail/mailFolders/inbox/messageRules
-        POST   /users/{id}/mail/mailFolders/inbox/messageRules
-        DELETE /users/{id}/mail/mailFolders/inbox/messageRules/{ruleId}
+        GET    /users/{id}/mailFolders/inbox/messageRules
+        POST   /users/{id}/mailFolders/inbox/messageRules
+        DELETE /users/{id}/mailFolders/inbox/messageRules/{ruleId}
 
     (server-side ``$filter`` on messageRules is not supported -> list + match
     locally.)
@@ -108,7 +108,7 @@ def _summarize_rule(rule: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _list_inbox_rules(client, ref: str) -> List[Dict[str, Any]]:
-    data = client.get(f"/users/{ref}/mail/mailFolders/inbox/messageRules",
+    data = client.get(f"/users/{ref}/mailFolders/inbox/messageRules",
                       params={"$top": 100})
     return [r for r in client.unwrap(data) if isinstance(r, dict)]
 
@@ -239,7 +239,7 @@ def register(mcp: "FastMCP", config: "EntraIDConfig") -> None:
             "actions": {action_key: [_recipient(dest)]},
         }
         created = client.post(
-            f"/users/{ref}/mail/mailFolders/inbox/messageRules", body)
+            f"/users/{ref}/mailFolders/inbox/messageRules", body)
         rules = _list_inbox_rules(client, ref)
         return {
             "mailbox": mailbox,
@@ -263,7 +263,7 @@ def register(mcp: "FastMCP", config: "EntraIDConfig") -> None:
             return {"mailbox": mailbox, "rule_id": rule_id, "removed": False,
                     "message": "Refusing to delete a rule without confirm=True."}
         ref = _resolve_mailbox_ref(client, mailbox)
-        client.delete(f"/users/{ref}/mail/mailFolders/inbox/messageRules/{rule_id}")
+        client.delete(f"/users/{ref}/mailFolders/inbox/messageRules/{rule_id}")
         remaining = _list_inbox_rules(client, ref)
         return {
             "mailbox": mailbox, "rule_id": rule_id, "removed": True,

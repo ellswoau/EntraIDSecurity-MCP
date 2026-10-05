@@ -652,6 +652,8 @@ class TestMailboxTools(unittest.TestCase):
         ]}
         cfg, client, mcp = _setup(responses=[FakeResponse(200, rules)])
         out = mcp.tools["list_mail_forwarding_rules"]("jdoe@contoso.com")
+        self.assertTrue(client._session.requests[0]["url"].endswith(
+            "/users/jdoe%40contoso.com/mailFolders/inbox/messageRules"))
         self.assertEqual(out["forwarding_rule_count"], 1)
         self.assertEqual(out["forwarding_rules"][0]["forward_targets"],
                          ["forwardTo:x@contoso.com"])
@@ -666,7 +668,7 @@ class TestMailboxTools(unittest.TestCase):
         req = client._session.requests[0]
         self.assertEqual(req["method"], "POST")
         self.assertTrue(req["url"].endswith(
-            "/users/jdoe%40contoso.com/mail/mailFolders/inbox/messageRules"))
+            "/users/jdoe%40contoso.com/mailFolders/inbox/messageRules"))
         self.assertIn("forwardTo", req["json"]["actions"])
 
     def test_remove_forwarding_refuses_without_confirm(self):

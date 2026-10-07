@@ -21,7 +21,9 @@ from . import (
     response_tools,
     risky_tools,
     session_tools,
+    sharepoint_tools,
     signin_tools,
+    team_tools,
     user_tools,
 )
 
@@ -36,5 +38,7 @@ def register_all(mcp: "FastMCP", config: "EntraIDConfig") -> None:
     session_tools.register(mcp, config)
     mailbox_tools.register(mcp, config)
     message_trace_tools.register(mcp, config)
+    sharepoint_tools.register(mcp, config)
+    team_tools.register(mcp, config)
     response_tools.register(mcp, config)
     api_tools.register(mcp, config)

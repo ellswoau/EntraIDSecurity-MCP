@@ -13,7 +13,7 @@ Protection risk, and enumerate the permissions and access a user actually holds.
 
 > Runs both as a direct `python -m` process **and** as a Docker container.
 
-## Tools (37)
+## Tools (57)
 
 **Sign-in logs** (`/auditLogs/signIns`)
 - `list_sign_ins` — all sign-ins, filter by user/app/IP/error code/CA status/risk/date window.
@@ -79,6 +79,34 @@ Protection risk, and enumerate the permissions and access a user actually holds.
 - `get_message_trace_details` — the per-message processing steps (Receive,
   Deliver, Transport rule, Fail, ...) for one traced message + recipient.
 
+**SharePoint sites / libraries / folder permissions** (`/sites`, `/drives`)
+- `list_sharepoint_sites` — find sites (search term; id, name, web URL).
+- `get_sharepoint_site` — one site by id, URL, or `host:/path`.
+- `list_sharepoint_libraries` — a site's document libraries (drive ids).
+- `list_sharepoint_folders` — the folders in a site's library (or subfolder).
+- `list_sharepoint_folder_contents` — files **and** folders in a drive/folder.
+- `list_sharepoint_item_permissions` — permissions on a folder/file.
+- `invite_to_sharepoint_item` — **mutating**: grant a user `read`/`write`/
+  `owner` on a folder/file (the driveItem `invite` API). Needs `confirm=True`.
+- `remove_sharepoint_item_permission` — **mutating**: revoke a folder/file
+  permission. Needs `confirm=True`.
+- `list_sharepoint_site_permissions` — a site's application permissions and
+  sharing links (the leaked-link audit view).
+- `update_sharepoint_site_permission` — **mutating**: change an app permission /
+  sharing link role. Needs `confirm=True`.
+- `remove_sharepoint_site_permission` — **mutating**: delete an app permission /
+  sharing link. Needs `confirm=True`.
+
+**Teams membership (owners + members)** (`/groups`, `/teams`)
+- `list_teams` — Teams (unified groups with Teams provisioned), by name prefix.
+- `get_team` — one Team's profile (backing group id, name, visibility).
+- `list_team_owners` / `list_team_members` — a Team's owners / members.
+- `add_team_owner` / `remove_team_owner` — **mutating**: add/remove a Team
+  owner. Need `confirm=True`.
+- `add_team_member` / `remove_team_member` — **mutating**: add/remove a Team
+  member (Team-scoped equivalent of `add_group_member`). Need `confirm=True`.
+- `list_team_channels` — a Team's channels (read-only).
+
 **Misc**
 - `entra_api_get` — read-only GET escape hatch for any other Graph v1.0 path.
 - `entraid_config` — redacted view of the configured tenant/app.
@@ -138,6 +166,43 @@ These are the **write** permissions the management tools need. Grant them
 | `UserAuthenticationMethod.ReadWrite.All` | `delete_user_auth_method`, `reset_user_mfa_methods` |
 | `MailboxSettings.ReadWrite` | `set_user_out_of_office`, `unset_user_out_of_office` (Read is enough for `get_user_out_of_office`) |
 | `Mail.ReadWrite` | `list_mail_forwarding_rules`, `set_mail_forwarding`, `remove_mail_forwarding_rule` |
+
+### Additional permissions for the SharePoint / Teams permission tools
+
+| Permission | Used by |
+|---|---|
+| `Sites.Read.All` | `list_sharepoint_sites`, `get_sharepoint_site`, `list_sharepoint_libraries`, `list_sharepoint_folders`, `list_sharepoint_folder_contents`, `list_sharepoint_item_permissions` |
+| `Files.ReadWrite.All` | `invite_to_sharepoint_item`, `remove_sharepoint_item_permission` (least privilege for the driveItem `invite`/permission APIs) |
+| `Sites.FullControl.All` | `list_sharepoint_site_permissions`, `update_sharepoint_site_permission`, `remove_sharepoint_site_permission` (managing *site* permissions is FullControl-only app-side) |
+| `Group.ReadWrite.All` *(already listed)* | `add_team_owner`, `remove_team_owner`, `add_team_member`, `remove_team_member` |
+| `Directory.Read.All` / `Group.Read.All` *(already listed)* | `list_teams`, `get_team`, `list_team_owners`, `list_team_members`, `list_team_channels` |
+
+> `Sites.Selected` is the least-privilege alternative to `Sites.FullControl.All`
+> for a scoped deployment: the app is granted access per site/list by a
+> SharePoint admin (`POST /sites/{id}/permissions` with the app identity).
+
+### What Graph cannot do for SharePoint permissions (important)
+
+- **A user's access to a site or folder is granted with the driveItem `invite`
+  API, not site permissions.** `POST /sites/{id}/permissions` in Graph v1.0
+  creates only an *application* permission ("you can't use it to create a new
+  user site permission"); the site-permission tools here manage application
+  permissions and sharing links.
+- **Adding a person as a SharePoint *site-collection owner* is not exposed by
+  Graph v1.0.** Site owners / site-collection admins are a SharePoint concept:
+  use the SharePoint admin center, PnP PowerShell
+  (`Set-PnPSite -Identity <site> -Owners <upn>`), or the SharePoint REST API
+  (`/_api/web/...`). To give a person access to a **library or folder**, use
+  `invite_to_sharepoint_item` with `role="owner"`.
+- New (not-yet-existing) **guests** cannot be invited app-only; existing users
+  and existing guests can.
+
+### Teams owners and members
+
+A Team is backed by a **unified** Microsoft 365 group, so its owners and members
+are managed through the backing group (`/groups/{id}/owners` and `/members`).
+This is fully supported app-only and needs `Group.ReadWrite.All`. Channel-level
+membership (`ChannelMember.ReadWrite.All`) is not modelled here.
 
 > **Mail forwarding uses `Mail.ReadWrite`, not `Mail.Send`** — a forwarding
 > rule is an Inbox message rule, not a send operation.

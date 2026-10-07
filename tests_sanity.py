@@ -28,7 +28,9 @@ from entraid_mcp.tools import (
     response_tools,
     risky_tools,
     session_tools,
+    sharepoint_tools,
     signin_tools,
+    team_tools,
     user_tools,
 )
 from entraid_mcp.tools import _common as c
@@ -119,6 +121,8 @@ def _setup(responses=None, seed_token=False, **cfg_kw):
     session_tools.register(mcp, cfg)
     mailbox_tools.register(mcp, cfg)
     message_trace_tools.register(mcp, cfg)
+    sharepoint_tools.register(mcp, cfg)
+    team_tools.register(mcp, cfg)
     response_tools.register(mcp, cfg)
     api_tools.register(mcp, cfg)
     return cfg, client, mcp
@@ -782,6 +786,160 @@ class TestMessageTrace(unittest.TestCase):
         cfg2 = _config(base_url="https://graph.microsoft.us/v1.0")
         self.assertEqual(cfg2.resolved_beta_url(),
                          "https://graph.microsoft.us/beta")
+
+
+# ------------------------------------------------------------- sharepoint
+class TestSharepointTools(unittest.TestCase):
+    def test_list_sites_builds_search(self):
+        cfg, client, mcp = _setup(responses=[FakeResponse(200, {"value": []})])
+        out = mcp.tools["list_sharepoint_sites"]()
+        req = client._session.requests[0]
+        self.assertTrue(req["url"].endswith("/sites"))
+        self.assertEqual(req["params"]["search"], "*")
+        self.assertEqual(out["count"], 0)
+
+    def test_get_site_from_url_normalizes(self):
+        cfg, client, mcp = _setup(responses=[FakeResponse(200, {"id": GUID})])
+        mcp.tools["get_sharepoint_site"]("https://contoso.sharepoint.com/sites/HR")
+        req = client._session.requests[0]
+        self.assertEqual(req["url"],
+                         cfg.resolved_base_url() + "/sites/contoso.sharepoint.com:/sites/HR")
+
+    def test_folder_contents_by_drive(self):
+        payload = {"value": [
+            {"id": "f1", "name": "HR", "folder": {"childCount": 3}},
+            {"id": "x1", "name": "a.txt", "file": {}},
+        ]}
+        cfg, client, mcp = _setup(responses=[FakeResponse(200, payload)])
+        out = mcp.tools["list_sharepoint_folder_contents"](drive_id="b!abc")
+        req = client._session.requests[0]
+        self.assertTrue(req["url"].endswith("/drives/b!abc/root/children"))
+        self.assertEqual(out["count"], 2)
+        self.assertTrue(out["items"][0]["is_folder"])
+
+    def test_list_item_permissions_resolves_path(self):
+        cfg, client, mcp = _setup(responses=[
+            FakeResponse(200, {"id": "IID", "folder": {}}),   # path -> id
+            FakeResponse(200, {"value": [{"id": "p1", "roles": ["write"],
+                "grantedToV2": {"user": {"id": GUID, "displayName": "Jo"}}}]}),
+        ])
+        out = mcp.tools["list_sharepoint_item_permissions"](
+            drive_id="b!abc", folder_path="Shared Documents/HR")
+        self.assertEqual(out["item_id"], "IID")
+        self.assertEqual(out["permissions"][0]["roles"], ["write"])
+        self.assertEqual(out["permissions"][0]["granted_to"]["user"]["display_name"], "Jo")
+
+    def test_invite_refuses_without_confirm(self):
+        cfg, client, mcp = _setup()
+        out = mcp.tools["invite_to_sharepoint_item"](
+            drive_id="b!abc", recipients=["jo@contoso.com"], role="write")
+        self.assertFalse(out["granted"])
+        self.assertEqual(len(client._session.requests), 0)
+
+    def test_invite_posts_recipients_and_verifies(self):
+        cfg, client, mcp = _setup(responses=[
+            FakeResponse(200, {"id": "IID", "folder": {}}),      # resolve root
+            FakeResponse(200, {"value": [{"id": "p1", "roles": ["write"]}]}),  # invite
+            FakeResponse(200, {"value": [{"id": "p1", "roles": ["write"]}]}),  # verify
+        ])
+        out = mcp.tools["invite_to_sharepoint_item"](
+            drive_id="b!abc", recipients=["jo@contoso.com"], role="write",
+            confirm=True)
+        invite_req = client._session.requests[1]
+        self.assertEqual(invite_req["method"], "POST")
+        self.assertTrue(invite_req["url"].endswith("/drives/b!abc/items/IID/invite"))
+        self.assertEqual(invite_req["json"]["roles"], ["write"])
+        self.assertEqual(invite_req["json"]["recipients"], [{"email": "jo@contoso.com"}])
+        self.assertTrue(out["granted"])
+
+    def test_invite_rejects_bad_role(self):
+        cfg, client, mcp = _setup()
+        with self.assertRaises(ValueError):
+            mcp.tools["invite_to_sharepoint_item"](
+                drive_id="b!abc", recipients=["jo@contoso.com"], role="admin",
+                confirm=True)
+        self.assertEqual(len(client._session.requests), 0)
+
+    def test_remove_item_permission_deletes(self):
+        cfg, client, mcp = _setup(responses=[
+            FakeResponse(204, has_content=False),
+            FakeResponse(200, {"value": []}),
+        ])
+        out = mcp.tools["remove_sharepoint_item_permission"](
+            drive_id="b!abc", item_id="IID", permission_id="p1", confirm=True)
+        req = client._session.requests[0]
+        self.assertEqual(req["method"], "DELETE")
+        self.assertTrue(req["url"].endswith("/drives/b!abc/items/IID/permissions/p1"))
+        self.assertTrue(out["removed"])
+        self.assertTrue(out["permission_removed"])
+
+    def test_list_site_permissions(self):
+        cfg, client, mcp = _setup(responses=[FakeResponse(200, {"value": [
+            {"id": "1", "roles": ["read"],
+             "link": {"type": "view", "scope": "anonymous", "webUrl": "https://x"}}]})])
+        out = mcp.tools["list_sharepoint_site_permissions"](GUID)
+        self.assertTrue(client._session.requests[0]["url"].endswith(
+            f"/sites/{GUID}/permissions"))
+        self.assertEqual(out["permissions"][0]["link"]["scope"], "anonymous")
+
+    def test_remove_site_permission_refuses_without_confirm(self):
+        cfg, client, mcp = _setup()
+        out = mcp.tools["remove_sharepoint_site_permission"](GUID, "1")
+        self.assertFalse(out["removed"])
+        self.assertEqual(len(client._session.requests), 0)
+
+
+# ------------------------------------------------------------------ teams
+class TestTeamTools(unittest.TestCase):
+    def test_list_teams_filters_by_team_option(self):
+        cfg, client, mcp = _setup(responses=[FakeResponse(200, {"value": [
+            {"id": GUID, "displayName": "Ops",
+             "groupTypes": ["Unified"], "resourceProvisioningOptions": ["Team"]}]})])
+        out = mcp.tools["list_teams"](query="Ops")
+        filt = client._session.requests[0]["params"]["$filter"]
+        self.assertIn("resourceProvisioningOptions/Any(c:c eq 'Team')", filt)
+        self.assertIn("startswith(displayName,'Ops')", filt)
+        self.assertEqual(out["count"], 1)
+
+    def test_add_owner_refuses_without_confirm(self):
+        cfg, client, mcp = _setup()
+        out = mcp.tools["add_team_owner"](GUID, GUID)
+        self.assertFalse(out["owner_added"])
+        self.assertEqual(len(client._session.requests), 0)
+
+    def test_add_owner_posts_ref_and_verifies(self):
+        cfg, client, mcp = _setup(responses=[
+            FakeResponse(200, {"id": GUID, "resourceProvisioningOptions": ["Team"]}),
+            FakeResponse(204, has_content=False),
+            FakeResponse(200, {"value": [{"id": GUID}]}),
+        ])
+        out = mcp.tools["add_team_owner"](GUID, GUID, confirm=True)
+        post = client._session.requests[1]
+        self.assertEqual(post["method"], "POST")
+        self.assertTrue(post["url"].endswith(f"/groups/{GUID}/owners/$ref"))
+        self.assertEqual(post["json"],
+                         {"@odata.id": f"https://graph.microsoft.com/v1.0/directoryObjects/{GUID}"})
+        self.assertTrue(out["owner_added"])
+        self.assertTrue(out["verified_owner"])
+
+    def test_remove_owner_deletes_ref(self):
+        cfg, client, mcp = _setup(responses=[
+            FakeResponse(200, {"id": GUID, "resourceProvisioningOptions": ["Team"]}),
+            FakeResponse(204, has_content=False),
+            FakeResponse(200, {"value": []}),
+        ])
+        out = mcp.tools["remove_team_owner"](GUID, GUID, confirm=True)
+        req = client._session.requests[1]
+        self.assertEqual(req["method"], "DELETE")
+        self.assertTrue(req["url"].endswith(f"/groups/{GUID}/owners/{GUID}/$ref"))
+        self.assertTrue(out["verified_absent"])
+
+    def test_resolve_team_rejects_plain_group(self):
+        cfg, client, mcp = _setup(responses=[
+            FakeResponse(200, {"id": GUID, "groupTypes": ["Unified"]}),
+        ])
+        with self.assertRaises(ValueError):
+            mcp.tools["list_team_owners"](GUID)
 
 
 if __name__ == "__main__":

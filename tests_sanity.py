@@ -21,6 +21,7 @@ from entraid_mcp.config import ConfigError, EntraIDConfig, load_config
 from entraid_mcp.tools import (
     api_tools,
     audit_tools,
+    exchange_delegation_tools,
     group_tools,
     mailbox_tools,
     message_trace_tools,
@@ -74,8 +75,14 @@ class FakeSession:
             return self._responses.pop(0)
         return FakeResponse(200, {"value": []})
 
-    def post(self, url, data=None, headers=None, timeout=None, verify=None):
-        self.posts.append({"url": url, "data": data, "headers": headers})
+    def post(self, url, data=None, headers=None, timeout=None, verify=None,
+             json=None):
+        self.posts.append({"url": url, "data": data, "headers": headers,
+                           "json": json})
+        if json is not None:
+            if self._responses:
+                return self._responses.pop(0)
+            return FakeResponse(200, {"value": []})
         return FakeResponse(200, dict(self._token_payload))
 
 
@@ -120,6 +127,7 @@ def _setup(responses=None, seed_token=False, **cfg_kw):
     mfa_tools.register(mcp, cfg)
     session_tools.register(mcp, cfg)
     mailbox_tools.register(mcp, cfg)
+    exchange_delegation_tools.register(mcp, cfg)
     message_trace_tools.register(mcp, cfg)
     sharepoint_tools.register(mcp, cfg)
     team_tools.register(mcp, cfg)
@@ -940,6 +948,104 @@ class TestTeamTools(unittest.TestCase):
         ])
         with self.assertRaises(ValueError):
             mcp.tools["list_team_owners"](GUID)
+
+
+
+# --------------------------------------------- exchange mailbox delegation
+class TestExchangeDelegation(unittest.TestCase):
+    """Mailbox-delegation tools call the Exchange Online Admin API (not Graph)."""
+
+    def setUp(self):
+        self.cfg, self.client, self.mcp = _setup()
+        # Seed the Exchange-resource token so no token mint happens.
+        self.client._exchange_token = "seeded-exchange"
+        self.client._exchange_expires_at = time.time() + 3600
+        self.client._session._responses = []
+
+    def _json_posts(self):
+        return [p for p in self.client._session.posts if p.get("json")]
+
+    def test_get_mailbox_delegation_reads(self):
+        self.client._session._responses = [FakeResponse(200, {"value": [{
+            "Identity": "careers@wellertruck.com",
+            "RecipientTypeDetails": "SharedMailbox",
+            "GrantSendOnBehalfTo": ["a@wellertruck.com"]}]})]
+        out = self.mcp.tools["get_mailbox_delegation"](
+            mailbox="careers@wellertruck.com")
+        self.assertTrue(out["found"])
+        self.assertEqual(out["summary"]["recipient_type_details"], "SharedMailbox")
+        post = self._json_posts()[-1]
+        self.assertTrue(post["url"].endswith(f"/adminapi/v2.0/{TENANT}/Mailbox"))
+        self.assertEqual(post["headers"]["X-AnchorMailbox"],
+                         "AAD-UPN:careers@wellertruck.com")
+        self.assertEqual(post["json"]["CmdletInput"]["CmdletName"], "Get-Mailbox")
+
+    def test_send_on_behalf_refuses_without_confirm(self):
+        out = self.mcp.tools["set_mailbox_send_on_behalf"](
+            mailbox="careers@wellertruck.com",
+            delegates=["a@wellertruck.com"])
+        self.assertFalse(out["updated"])
+        self.assertEqual(self.client._session.posts, [])
+
+    def test_send_on_behalf_overwrite_builds_list(self):
+        self.client._session._responses = [
+            FakeResponse(200, has_content=False),  # Set-Mailbox 200 OK, no body
+            FakeResponse(200, {"value": [{
+                "GrantSendOnBehalfTo": ["b@wellertruck.com"]}]}),  # verify
+        ]
+        out = self.mcp.tools["set_mailbox_send_on_behalf"](
+            mailbox="careers@wellertruck.com",
+            delegates=["b@wellertruck.com"], confirm=True)
+        self.assertTrue(out["updated"])
+        params = self._json_posts()[0]["json"]["CmdletInput"]["Parameters"]
+        self.assertEqual(params["Identity"], "careers@wellertruck.com")
+        self.assertEqual(params["GrantSendOnBehalfTo"], ["b@wellertruck.com"])
+
+    def test_send_on_behalf_add_builds_hashtable(self):
+        self.client._session._responses = [
+            FakeResponse(200, has_content=False),
+            FakeResponse(200, {"value": [{
+                "GrantSendOnBehalfTo": ["a@wellertruck.com", "b@wellertruck.com"]}]}),
+        ]
+        self.mcp.tools["add_mailbox_send_on_behalf"](
+            mailbox="careers@wellertruck.com",
+            delegates=["b@wellertruck.com"], confirm=True)
+        params = self._json_posts()[0]["json"]["CmdletInput"]["Parameters"]
+        self.assertEqual(params["GrantSendOnBehalfTo"]["add"], ["b@wellertruck.com"])
+        self.assertEqual(params["GrantSendOnBehalfTo"]["@odata.type"],
+                         "#Exchange.GenericHashTable")
+
+    def test_folder_permission_identity_and_anchor(self):
+        self.client._session._responses = [FakeResponse(200, {"value": []})]
+        self.mcp.tools["list_mailbox_folder_permissions"](
+            mailbox="careers@wellertruck.com", folder="Calendar")
+        post = self._json_posts()[-1]
+        self.assertTrue(post["url"].endswith(
+            f"/adminapi/v2.0/{TENANT}/MailboxFolderPermission"))
+        params = post["json"]["CmdletInput"]["Parameters"]
+        self.assertEqual(params["Identity"],
+                         "careers@wellertruck.com:\\Calendar")
+
+    def test_add_folder_permission_refuses_without_confirm(self):
+        out = self.mcp.tools["add_mailbox_folder_permission"](
+            mailbox="careers@wellertruck.com", folder="Calendar",
+            user="b@wellertruck.com", access_rights="Editor")
+        self.assertFalse(out["applied"])
+        self.assertEqual(self.client._session.posts, [])
+
+    def test_exchange_token_uses_exchange_scope(self):
+        self.client._exchange_token = ""
+        self.client._exchange_expires_at = 0.0
+        self.client._session._responses = [FakeResponse(200, {"value": []})]
+        self.mcp.tools["list_mailbox_folder_permissions"](
+            mailbox="careers@wellertruck.com")
+        token_post = [p for p in self.client._session.posts if p.get("data")][0]
+        self.assertEqual(token_post["data"]["scope"],
+                         "https://outlook.office365.com/.default")
+
+    def test_exchange_endpoint_rejects_injection(self):
+        with self.assertRaises(EntraIDError):
+            self.client.post_exchange("../Mailbox", {})
 
 
 if __name__ == "__main__":

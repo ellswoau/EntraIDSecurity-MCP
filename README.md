@@ -71,6 +71,27 @@ Protection risk, and enumerate the permissions and access a user actually holds.
 - `remove_mail_forwarding_rule` — **mutating**: delete a forwarding rule.
   Needs `confirm=True`.
 
+**Mailbox delegation (Send on Behalf + folder access)** — Exchange Online
+**Admin API** (`outlook.office365.com/adminapi/v2.0`, preview)
+- `get_mailbox_delegation` — read a mailbox's Send-on-Behalf delegates.
+- `set_mailbox_send_on_behalf` — **mutating**: overwrite/add/remove the Send on
+  Behalf delegate list (`mode` = `overwrite`|`add`|`remove`). Needs `confirm=True`.
+- `add_mailbox_send_on_behalf` / `remove_mailbox_send_on_behalf` — **mutating**
+  convenience wrappers. Need `confirm=True`.
+- `list_mailbox_folder_permissions` — folder permissions (delegates) on a
+  mailbox folder (default `Calendar`).
+- `add_mailbox_folder_permission` — **mutating**: grant a role (`Reviewer` /
+  `Editor` / `PublishingEditor`) on a folder. Needs `confirm=True`.
+- `set_mailbox_folder_permission` — **mutating**: change an existing grantee's
+  folder role. Needs `confirm=True`.
+- `remove_mailbox_folder_permission` — **mutating**: revoke a folder permission.
+  Needs `confirm=True`.
+
+> These are the mailbox-delegation tools. They use the **Exchange Online Admin
+> API**, not Graph, and need a different permission (see *Mailbox delegation*
+> below). Mailbox-level **Full Access** and **Send As** are **not** available
+> here (or anywhere in an API) — see the caveat below.
+
 **Exchange message trace** (`/admin/exchange/tracing/messageTraces` — Graph **beta**)
 - `list_message_traces` — trace email through Exchange Online (last 90 days):
   sender/recipient, subject, delivery status, size, source/destination IPs.
@@ -147,6 +168,18 @@ Least-privilege set for a **read-only** investigation server:
 | `Organization.Read.All` | `entraid_config`, `ping` connection test |
 
 | `ExchangeMessageTrace.Read.All` | `list_message_traces`, `get_message_trace_details` (see the service-principal note below) |
+
+### Mailbox delegation (Exchange Online Admin API — not a Graph scope)
+
+The mailbox-delegation tools (`get_mailbox_delegation`,
+`*_mailbox_send_on_behalf`, `*_mailbox_folder_permission`) call the **Exchange
+Online Admin API**, which is a **different resource** from Graph. They mint an
+app-only token for `https://outlook.office365.com/.default` and need:
+
+| Permission | Used by |
+|---|---|
+| `Office 365 Exchange Online → Exchange.ManageAsAppV2` (**application**, admin-consented) | every mailbox-delegation tool |
+| An **Exchange RBAC role** on the service principal (e.g. `Recipient Management`) | the same tools (assign with `New-ServicePrincipal` + `Add-RoleGroupMember` in Exchange Online PowerShell) |
 
 Add only if you want the two mutating tools enabled:
 
@@ -229,12 +262,23 @@ Message trace is throttled at **100 requests / 5 minutes** per tenant (the list
 and detail APIs have separate buckets). Data is retained 90 days; each request
 spans at most 10 days (call with adjacent windows for longer ranges).
 
-### What Graph cannot do (important)
+### What Graph cannot do — and what the Admin API can (important)
 
-**Shared-mailbox delegation is not available in Microsoft Graph.** Adding or
-removing a user's Full Access / Send As / Send on Behalf permission on a
-(non-user) shared mailbox is an Exchange Online mailbox-permission operation
-and only exists in **Exchange Online PowerShell**:
+**Microsoft Graph exposes no mailbox permissions at all.** Adding or removing a
+user's **Full Access**, **Send As** or **Send on Behalf** on a (shared) mailbox
+is an Exchange Online mailbox-permission operation.
+
+The supported **REST** surface for this is the **Exchange Online Admin API**
+(preview), which the delegation tools here use. It covers:
+
+- **Send on Behalf** — `Set-Mailbox -GrantSendOnBehalfTo`
+  (`*_mailbox_send_on_behalf`).
+- **Mailbox folder permissions** — `Add-/Set-/Remove-MailboxFolderPermission`
+  (`*_mailbox_folder_permission`), i.e. delegating the Calendar/Inbox.
+
+It does **not** cover mailbox-level **Full Access** (`Add-MailboxPermission`)
+or **Send As** (`Add-RecipientPermission`) — those two exist only in
+**Exchange Online PowerShell**:
 
 ```powershell
 Add-MailboxPermission -Identity "shared@contoso.com" -User "user@contoso.com" `
@@ -242,6 +286,10 @@ Add-MailboxPermission -Identity "shared@contoso.com" -User "user@contoso.com" `
 Add-RecipientPermission -Identity "shared@contoso.com" -Trustee "user@contoso.com" `
   -AccessRights SendAs
 ```
+
+`Connect-ExchangeOnline` app-only requires **certificate** authentication (a
+client secret is not accepted), so Full Access / Send As stay an Exchange
+PowerShell change rather than an MCP call.
 
 Graph *can* read/change a shared mailbox's **own** settings (out-of-office,
 Inbox rules, messages) by addressing it with its id/UPN — that is what the

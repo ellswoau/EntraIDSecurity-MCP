@@ -31,6 +31,10 @@ ENV_AUTHORITY_HOST = "ENTRAID_AUTHORITY_HOST"
 ENV_VERIFY_SSL = "ENTRAID_VERIFY_SSL"
 ENV_TIMEOUT = "ENTRAID_TIMEOUT"
 ENV_CONFIG_FILE = "ENTRAID_CONFIG_FILE"
+# Exchange Online Admin API (mailbox delegation). Same app credentials, a
+# different resource/scope and service root.
+ENV_EXCHANGE_BASE_URL = "ENTRAID_EXCHANGE_BASE_URL"
+ENV_EXCHANGE_SCOPE = "ENTRAID_EXCHANGE_SCOPE"
 # Optional bearer key that gates the network MCP endpoints when set. Kept
 # strictly separate from the Entra ID app credentials above.
 ENV_MCP_TOKEN = "ENTRAID_MCP_AUTH_TOKEN"
@@ -40,6 +44,9 @@ DEFAULT_BASE_URL = "https://graph.microsoft.com/v1.0"
 DEFAULT_BETA_URL = "https://graph.microsoft.com/beta"
 DEFAULT_AUTHORITY_HOST = "https://login.microsoftonline.com"
 DEFAULT_SCOPE = "https://graph.microsoft.com/.default"
+# Exchange Online Admin API root (preview); the tenant id is appended per call.
+DEFAULT_EXCHANGE_BASE_URL = "https://outlook.office365.com/adminapi/v2.0"
+DEFAULT_EXCHANGE_SCOPE = "https://outlook.office365.com/.default"
 
 _PASSWORD_TAG = "***REDACTED***"
 
@@ -59,6 +66,10 @@ class EntraIDConfig:
     # OAuth2 scope requested at the token endpoint. `.default` maps the app's
     # granted application permissions into the token.
     scope: str = DEFAULT_SCOPE
+    # Exchange Online Admin API service root (mailbox delegation) and the
+    # OAuth2 scope that mints its app-only token (the Exchange resource).
+    exchange_base_url: str = DEFAULT_EXCHANGE_BASE_URL
+    exchange_scope: str = DEFAULT_EXCHANGE_SCOPE
     verify_ssl: bool = True
     timeout: int = 30
     # Optional bearer key that gates the HTTP/streamable-http MCP transport.
@@ -87,6 +98,13 @@ class EntraIDConfig:
             return DEFAULT_BETA_URL
         return base + "/beta"
 
+    def resolved_exchange_base_url(self) -> str:
+        """Return the Exchange Online Admin API root without a trailing slash."""
+        url = (self.exchange_base_url or "").strip() or DEFAULT_EXCHANGE_BASE_URL
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+        return url.rstrip("/")
+
     def resolved_authority_host(self) -> str:
         host = (self.authority_host or "").strip() or DEFAULT_AUTHORITY_HOST
         if not host.startswith(("http://", "https://")):
@@ -104,6 +122,7 @@ class EntraIDConfig:
         d["mcp_auth_token"] = _PASSWORD_TAG if d.get("mcp_auth_token") else ""
         d["base_url"] = self.resolved_base_url()
         d["authority_host"] = self.resolved_authority_host()
+        d["exchange_base_url"] = self.resolved_exchange_base_url()
         return d
 
     def is_complete(self) -> bool:
@@ -129,6 +148,8 @@ def load_config(
     base_url: Optional[str] = None,
     authority_host: Optional[str] = None,
     scope: Optional[str] = None,
+    exchange_base_url: Optional[str] = None,
+    exchange_scope: Optional[str] = None,
     verify_ssl: Optional[bool] = None,
     timeout: Optional[int] = None,
     mcp_auth_token: Optional[str] = None,
@@ -144,7 +165,8 @@ def load_config(
     if config_file and Path(config_file).exists():
         data = json.loads(Path(config_file).read_text(encoding="utf-8"))
         for key in ("tenant_id", "client_id", "client_secret", "base_url",
-                    "authority_host", "scope", "verify_ssl", "timeout",
+                    "authority_host", "scope", "exchange_base_url",
+                    "exchange_scope", "verify_ssl", "timeout",
                     "mcp_auth_token"):
             if key in data and data[key] is not None:
                 setattr(cfg, key, data[key])
@@ -154,7 +176,9 @@ def load_config(
                            (ENV_CLIENT_ID, "client_id"),
                            (ENV_CLIENT_SECRET, "client_secret"),
                            (ENV_BASE_URL, "base_url"),
-                           (ENV_AUTHORITY_HOST, "authority_host")):
+                           (ENV_AUTHORITY_HOST, "authority_host"),
+                           (ENV_EXCHANGE_BASE_URL, "exchange_base_url"),
+                           (ENV_EXCHANGE_SCOPE, "exchange_scope")):
         if os.environ.get(env_name):
             setattr(cfg, attr, os.environ[env_name].strip())
     if os.environ.get(ENV_VERIFY_SSL) is not None:
@@ -180,6 +204,10 @@ def load_config(
         cfg.authority_host = authority_host.strip()
     if scope is not None:
         cfg.scope = scope.strip()
+    if exchange_base_url is not None:
+        cfg.exchange_base_url = exchange_base_url.strip()
+    if exchange_scope is not None:
+        cfg.exchange_scope = exchange_scope.strip()
     if verify_ssl is not None:
         cfg.verify_ssl = bool(verify_ssl)
     if timeout is not None:

@@ -14,6 +14,7 @@ if TYPE_CHECKING:  # pragma: no cover
 from . import (
     api_tools,
     audit_tools,
+    exchange_delegation_tools,
     group_tools,
     mailbox_tools,
     message_trace_tools,
@@ -37,6 +38,7 @@ def register_all(mcp: "FastMCP", config: "EntraIDConfig") -> None:
     mfa_tools.register(mcp, config)
     session_tools.register(mcp, config)
     mailbox_tools.register(mcp, config)
+    exchange_delegation_tools.register(mcp, config)
     message_trace_tools.register(mcp, config)
     sharepoint_tools.register(mcp, config)
     team_tools.register(mcp, config)

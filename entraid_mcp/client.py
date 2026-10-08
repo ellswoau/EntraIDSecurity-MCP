@@ -73,6 +73,9 @@ class EntraIDClient:
     def __init__(self, config: EntraIDConfig):
         self.config = config
         self.base_url = config.resolved_base_url()
+        # Exchange Online Admin API root (mailbox delegation); a separate
+        # resource/scope from Graph but the same app-only credentials.
+        self.exchange_base_url = config.resolved_exchange_base_url()
         self.verify_ssl = config.verify_ssl
         self.timeout = config.timeout
         self._session = requests.Session()
@@ -84,6 +87,9 @@ class EntraIDClient:
         self._expires_at = 0.0
         self._token_info: Dict[str, Any] = {}
         self._token_lock = threading.Lock()
+        # Separate cache for the Exchange-resource token (its own audience).
+        self._exchange_token = ""
+        self._exchange_expires_at = 0.0
 
     # ---------------------------------------------------------------- helpers
     @staticmethod
@@ -128,8 +134,8 @@ class EntraIDClient:
             "scope": payload.get("scope"),
         }
 
-    def authenticate(self) -> Dict[str, Any]:
-        """Mint a fresh app access token via the client-credentials grant."""
+    def _request_token(self, scope: str) -> Dict[str, Any]:
+        """Mint an app-only token for ``scope`` via the client-credentials grant."""
         if not (self.config.tenant_id and self.config.client_id
                 and self.config.client_secret):
             raise EntraIDError(
@@ -144,7 +150,7 @@ class EntraIDClient:
                 "grant_type": self.GRANT_CLIENT_CREDENTIALS,
                 "client_id": self.config.client_id,
                 "client_secret": self.config.client_secret,
-                "scope": self.config.scope,
+                "scope": scope,
             },
             timeout=self.timeout,
             verify=self.verify_ssl,
@@ -168,8 +174,32 @@ class EntraIDClient:
                 + self._detail_str(body),
                 body,
             )
+        return body
+
+    def authenticate(self) -> Dict[str, Any]:
+        """Mint a fresh Graph app access token via the client-credentials grant."""
+        body = self._request_token(self.config.scope)
         self._store_token(body)
         return body
+
+    def ensure_exchange_token(self) -> str:
+        """Return a usable app-only token for the Exchange resource.
+
+        The Exchange Online Admin API is a different resource from Graph, so
+        its token is minted with the Exchange scope and cached separately.
+        """
+        with self._token_lock:
+            if self._exchange_token and time.time() < (
+                    self._exchange_expires_at - self.TOKEN_SKEW_SECONDS):
+                return self._exchange_token
+            body = self._request_token(self.config.exchange_scope)
+            self._exchange_token = body.get("access_token", "") or self._exchange_token
+            try:
+                expires_in = int(body.get("expires_in"))
+            except (TypeError, ValueError):
+                expires_in = 3599
+            self._exchange_expires_at = time.time() + max(0, expires_in)
+            return self._exchange_token
 
     def _token_valid(self) -> bool:
         return bool(self._access_token) and time.time() < (
@@ -186,6 +216,71 @@ class EntraIDClient:
     def token_info(self) -> Dict[str, Any]:
         """Return redacted metadata about the current token (never the token)."""
         return dict(self._token_info)
+
+    # ------------------------------------------- Exchange Online Admin API
+    def post_exchange(self, endpoint: str, body: Any, *,
+                      anchor_mailbox: str = "" ) -> Any:
+        """POST a CmdletInput envelope to the Exchange Online Admin API.
+
+        The Admin API is a separate service (``outlook.office365.com``) with its
+        own resource token, so it is not routed through the Graph origin guard;
+        ``endpoint`` is a fixed name (for example ``Mailbox``) and the base URL
+        is built internally -- nothing caller-supplied is interpolated into the
+        host. ``anchor_mailbox`` sets the mandatory ``X-AnchorMailbox`` routing
+        hint (``AAD-UPN:<mailbox>``).
+        """
+        ep = str(endpoint or "").strip().strip("/")
+        if not ep or any(ch in ep for ch in "/?# \t\n\r"):
+            raise EntraIDError(None, f"Invalid Exchange Admin API endpoint: {endpoint!r}.")
+        url = f"{self.exchange_base_url}/{self.config.tenant_id}/{ep}"
+        token = self.ensure_exchange_token()
+        headers = {"Authorization": f"Bearer {token}",
+                   "Content-Type": "application/json"}
+        anchor = str(anchor_mailbox or "").strip()
+        if anchor:
+            headers["X-AnchorMailbox"] = f"AAD-UPN:{anchor}"
+
+        resp = None
+        attempt = 0
+        while True:
+            attempt += 1
+            resp = self._session.post(url, json=body, headers=headers,
+                                      timeout=self.timeout, verify=self.verify_ssl)
+            if resp.status_code != 429:
+                break
+            if attempt >= self.MAX_RETRIES:
+                break
+            wait = self.RATE_LIMIT_MIN_BACKOFF * (2 ** (attempt - 1))
+            if "Retry-After" in resp.headers:
+                try:
+                    wait = max(wait, float(resp.headers["Retry-After"]))
+                except ValueError:
+                    pass
+            time.sleep(min(wait, self.RATE_LIMIT_MAX_BACKOFF))
+        if resp.status_code == 429:
+            raise EntraIDError(
+                429,
+                f"Exchange Admin API rate limit exceeded for {url} (retried "
+                f"{self.MAX_RETRIES} times). Wait and retry.",
+            )
+        if resp.status_code < 200 or resp.status_code >= 300:
+            detail = self._parse(resp)
+            code, message = self._graph_error(detail)
+            hint = ""
+            if resp.status_code == 403:
+                hint = (" The app registration needs the Exchange.ManageAsAppV2 "
+                        "application permission (admin-consented) AND an Exchange "
+                        "RBAC role on the service principal.")
+            elif resp.status_code == 401:
+                hint = (" The app registration is missing the Exchange.ManageAsAppV2 "
+                        "application permission (admin-consented).")
+            raise EntraIDError(
+                resp.status_code,
+                f"Exchange Admin API {resp.status_code} for {url}: "
+                f"{message or code or self._detail_str(detail)}.{hint}",
+                detail, code,
+            )
+        return self._parse(resp)
 
     # ---------------------------------------------------------------- request
     def _url(self, path: str, base_url: Optional[str] = None) -> str:
